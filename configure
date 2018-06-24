@@ -6,15 +6,15 @@
 #
 # This file is licensed under the MIT "Expat" License.
 #
-# Copyright (C) 2015, Éric Thiébaut <eric.thiebaut@univ-lyon1.fr>
+# Copyright (C) 2018, Éric Thiébaut <eric.thiebaut@univ-lyon1.fr>
 #
 #------------------------------------------------------------------------------
 
 # The following default values are specific to the package.  They can be
 # overwritten by options on the command line.
-cfg_cflags=
-cfg_deplibs=
-cfg_ldflags=
+cfg_cflags="-I/apps/include"
+cfg_deplibs="-L/apps/lib -lyaml"
+cfg_ldflags=""
 
 # The other values are pretty general.
 cfg_tmpdir=.

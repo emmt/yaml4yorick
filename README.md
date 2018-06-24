@@ -1,10 +1,14 @@
 yaml
 ======
 
-Interface to YAML files.
+Yorick interface to [YAML](http://yaml.org/) files.
+
 
 Installation
 ------------
+
+You must have [libyaml](https://github.com/yaml/libyaml) installed in your
+system with development (header) files.
 
 In short, building and installing the plug-in can be as quick as:
 ````{.sh}
