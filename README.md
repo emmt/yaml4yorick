@@ -1,5 +1,5 @@
-yaml
-======
+yaml4yorick
+===========
 
 Yorick interface to [YAML](http://yaml.org/) files.
 
