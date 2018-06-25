@@ -17,10 +17,10 @@ func yaml_print(filename)
 {
   true = 1n;
   false = 0n;
-  parser = yaml_parser(filename);
+  parser = yaml_open(filename, "r");
   done = false;
   while (! done) {
-    event = yaml_next_event(parser);
+    event = yaml_parse(parser);
     type = event.type;
     if (type == YAML_NO_EVENT) {
       str = "No event!";
@@ -33,6 +33,10 @@ func yaml_print(filename)
       str = "<b>Start Document</b>";
     } else if (type == YAML_DOCUMENT_END_EVENT) {
       str = "<b>End Document</b>";
+    } else if (type == YAML_ALIAS_EVENT) {
+      str = swrite(format="Got alias (anchor %s)", event.anchor);
+    } else if (type == YAML_SCALAR_EVENT) {
+      str = swrite(format="Got scalar (value %s)", event.value);
     } else if (type == YAML_SEQUENCE_START_EVENT) {
       str = "<b>Start Sequence</b>";
     } else if (type == YAML_SEQUENCE_END_EVENT) {
@@ -41,10 +45,6 @@ func yaml_print(filename)
       str = "<b>Start Mapping</b>";
     } else if (type == YAML_MAPPING_END_EVENT) {
       str = "<b>End Mapping</b>";
-    } else if (type == YAML_ALIAS_EVENT) {
-      str = swrite(format="Got alias (anchor %s)", event.anchor);
-    } else if (type == YAML_SCALAR_EVENT) {
-      str = swrite(format="Got scalar (value %s)", event.value);
     } else  {
       str = "<b>Unknown Event</b>";
     }
@@ -55,21 +55,179 @@ func yaml_print(filename)
 /*extern yaml_event;*/
 
 extern yaml_debug;
-extern yaml_parser;
-/* DOCUMENT parser = yaml_parser(filename);
+extern yaml_open;
+/* DOCUMENT parser = yaml_open(filename);
+         or parser = yaml_open(filename, "r");
+         or emitter = yaml_open(filename, "w");
+         or emitter = yaml_open(filename, "a");
 
-   SEE ALSO:
+      This function opens file FILENAME for reading or writing.  If the mode
+      is "w", the file is opened for writing, the file is is truncated to zero
+      length or created.  It the mode is "a", the file is opened for appending
+      (writing at end of file), the file is created if it does not exist.
+
+   SEE ALSO: yaml_parse, yaml_emit.
  */
 
-extern yaml_next_event;
-/* DOCUMENT event = yaml_next_event(parser);
-         or event = yaml_next_event(parser, event);
+extern yaml_parse;
+/* DOCUMENT event = yaml_parse(parser);
+         or event = yaml_parse(parser, event);
 
-     Yields next YAML event from parser PARSER.  The returned value is
-     an instance of YAML event.  Second argument may be an existing
+     This function yields the next YAML event from a parser.  The returned
+     value is an instance of YAML event.  Second argument may be an existing
      YAML event instance which is reused (and returned).
 
-   SEE ALSO:
+   SEE ALSO: yaml_open.
+ */
+
+extern yaml_emit;
+/* DOCUMENT yaml_emit, emitter, event, ...;
+
+     Emits event(s) with YAML emitter.  There may be any events in the
+     argument list.  The contents of emitted events is destroyed (these events
+     becomes uninitialized).
+
+   SEE ALSO: yaml_open.
+ */
+
+extern yaml_stream_start_event;
+extern yaml_stream_end_event;
+/* DOCUMENT event = yaml_stream_start_event([event,] encoding=);
+         or event = yaml_stream_end_event([event]);
+
+     These functions yield a YAML STREAM-START or a STREAM-END event.
+     Optional EVENT argument can be provided to re-use an existing YAML event
+     (of any kind); in that case, these functions can be called as
+     subroutines.
+
+     The attribute of the STREAM-START event is specified by keyword:
+
+     - encoding    The stream encoding.  Default is YAML_ANY_ENCODING.
+
+
+   SEE ALSO: yaml_emit.
+ */
+
+extern yaml_document_start_event;
+extern yaml_document_end_event;
+/* DOCUMENT event = yaml_document_start_event([event,] version=, tag=,
+                                              implicit=);
+         or event = yaml_document_end_event([event]);
+
+     These functions yield a YAML DOCUMENT-START or a DOCUMENT-END event.
+     Optional EVENT argument can be provided to re-use an existing YAML event
+     (of any kind); in that case, these functions can be called as
+     subroutines.
+
+     All attributes of the DOCUMENT-START event are specified by keywords:
+
+     - version: The YAML version directive for the document specified as
+           a string of the form "major.minor".  Default is NULL.
+
+     - implicit: Specify whether the document start indicator is implicit.
+           This is considered as a stylistic parameter and may be ignored by
+           the emitter.
+
+
+   SEE ALSO: yaml_emit.
+ */
+
+extern yaml_alias_event;
+/* DOCUMENT event = yaml_alias_event([event,] tag=);
+
+     This function yields a YAML ALIAS event.  Optional EVENT argument can be
+     provided to re-use an existing YAML event (of any kind); in that case,
+     the function can be called as a subroutine.  A single mandatory attribute
+     has to be specified by keyword:
+
+     - anchor: The sequence anchor.
+
+   SEE ALSO: yaml_emit.
+ */
+
+extern yaml_scalar_event;
+/* DOCUMENT event = yaml_scalar_event([event,] anchor=, tag=, value=, style=,
+                                      quoted_implicit=, plain_implicit=);
+
+     This function yields a YAML SCALAR event.  Optional EVENT argument can be
+     provided to re-use an existing YAML event (of any kind); in that case,
+     the function can be called as a subroutine.  All attributes are specified
+     by keywords:
+
+     - anchor: The scalar anchor.  Default is NULL.
+
+     - tag: The scalar tag.  Default is NULL.
+
+     - value: The scalar value.  Default is NULL.
+
+     - plain_implicit: Specify whether the tag may be omitted for the style.
+
+     - quoted_implicit: Specify whether the tag may be omitted for any
+           non-plain style.
+
+     - style: The scalar style.  Default is YAML_ANY_SCALAR_STYLE.  The style
+           argument may be ignored by the emitter.
+
+     Either the `tag` attribute or one of the `plain_implicit` and
+     `quoted_implicit` flags must be set.
+
+   SEE ALSO: yaml_emit.
+ */
+
+extern yaml_sequence_start_event;
+extern yaml_sequence_end_event;
+/* DOCUMENT event = yaml_sequence_start_event([event,] anchor=, tag=,
+                                              implicit=, style=);
+         or event = yaml_sequence_end_event([event]);
+
+     These functions yield a YAML SEQUENCE-START or a SEQUENCE-END event.
+     Optional EVENT argument can be provided to re-use an existing YAML event
+     (of any kind); in that case, these functions can be called as
+     subroutines.
+
+     All attributes of the SEQUENCE-START event are specified by keywords:
+
+     - anchor: The sequence anchor.  Default is NULL.
+
+     - tag: The sequence tag.  Default is NULL.
+
+     - implicit: Specify whether the tag may be omitted.
+
+     - style: The sequence style.  Default is YAML_ANY_SEQUENCE_STYLE.  The
+           style argument may be ignored by the emitter.
+
+     Either the `tag` attribute or the `implicit` flag must be set.
+
+   SEE ALSO: yaml_emit.
+ */
+
+extern yaml_mapping_start_event;
+extern yaml_mapping_end_event;
+/* DOCUMENT event = yaml_mapping_start_event([event,] anchor=, tag=,
+                                             implicit=, style=);
+         or event = yaml_mapping_end_event([event]);
+
+     These functions yield a YAML MAPPING-START or a MAPPING-END event.
+     Optional EVENT argument can be provided to re-use an existing YAML event
+     (of any kind); in that case, these functions can be called as
+     subroutines.
+
+     All attributes of the MAPPING-START event are specified by keywords:
+
+     - anchor: The mapping anchor.  Default is NULL.
+
+     - tag: The scalar tag.  Default is NULL.
+
+     - value: The scalar value.  Default is NULL.
+
+     - implicit: Specify whether the tag may be omitted.
+
+     - style: The mapping style.  Default is YAML_ANY_MAPPING_STYLE.  The
+           style argument may be ignored by the emitter.
+
+     Either the `tag` attribute or the `implicit` flag must be set.
+
+   SEE ALSO: yaml_emit.
  */
 
 /*---------------------------------------------------------------------------*/

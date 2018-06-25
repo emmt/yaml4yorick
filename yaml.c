@@ -43,7 +43,19 @@ PLUG_API void y_error(const char *) __attribute__ ((noreturn));
 static void push_string(const char* str);
 static void push_ustring(const yaml_char_t* str);
 static void define_int_const(const char* name, int value);
-static void define_long_const(const char* name, long value);
+
+/* Parse literal integer, return NULL on error, pointer to next unparsed
+ * character else. */
+static const char* parse_integer(const char* str, long* ptr,
+                                 unsigned int flags);
+
+/* Flags for parse_integer. */
+#define TRIM_LEFT  (1U << 0)
+#define TRIM_RIGHT (1U << 1)
+#define NO_SIGN    (1U << 2)
+
+/*---------------------------------------------------------------------------*/
+/* UTILITIES */
 
 static void
 define_int_const(const char* name, int value)
@@ -53,17 +65,34 @@ define_int_const(const char* name, int value)
   yarg_drop(1);
 }
 
-static void
-define_long_const(const char* name, long value)
-{
-  ypush_long(value);
-  yput_global(yget_global(name, 0), 0);
-  yarg_drop(1);
-}
+static int initialized = FALSE;
 
-void
-Y___yaml_init__(int argc)
+static long anchor_index = -1L;
+static long encoding_index = -1L;
+static long implicit_index = -1L;
+static long plain_implicit_index = -1L;
+static long quoted_implicit_index = -1L;
+static long style_index = -1L;
+static long tag_index = -1L;
+static long value_index = -1L;
+static long version_index = -1L;
+
+static void
+initialize()
 {
+  /* Initialize all keyword indexes. */
+#define INIT(s) if (s##_index == -1L) s##_index = yget_global(#s, 0)
+  INIT(anchor);
+  INIT(encoding);
+  INIT(implicit);
+  INIT(plain_implicit);
+  INIT(quoted_implicit);
+  INIT(style);
+  INIT(tag);
+  INIT(value);
+  INIT(version);
+#undef INIT
+
 #define DEFINE_INT_CONST(c)  define_int_const(#c, c)
   /* YStream encoding. */
   DEFINE_INT_CONST(YAML_ANY_ENCODING);
@@ -195,6 +224,8 @@ Y___yaml_init__(int argc)
   DEFINE_INT_CONST(YAML_EMIT_END_STATE);
 
 #undef DEFINE_INT_CONST
+
+  initialized = TRUE;
 }
 
 static void
@@ -209,6 +240,52 @@ push_ustring(const yaml_char_t* str)
   push_string((const char*)str);
 }
 
+static const char*
+parse_integer(const char* str, long* ptr, unsigned int flags)
+{
+  long value;
+  int c, sign = 0;
+
+  if (str == NULL) {
+    return NULL;
+  }
+  if ((flags & TRIM_LEFT) != 0) {
+    while (isspace(str[0])) {
+      ++str;
+    }
+  }
+  c = str[0];
+  if ((flags & NO_SIGN) == 0) {
+    if (c == '+') {
+      sign = +1;
+      c = *++str;
+    } else if (c == '-') {
+      sign = -1;
+      c = *++str;
+    }
+  }
+  if (c < '0' || c > '9') {
+    return NULL;
+  }
+  value = c - '0';
+  while (TRUE) {
+    c = *++str;
+    if (c < '0' || c > '9') {
+      break;
+    }
+    value = 10*value + (c - '0');
+  }
+  if ((flags & TRIM_RIGHT) != 0) {
+    while (isspace(str[0])) {
+      ++str;
+    }
+  }
+  if (ptr != NULL) {
+    *ptr = (sign < 0 ? -value : value);
+  }
+  return str;
+}
+
 /*---------------------------------------------------------------------------*/
 /* YAML EVENT OBJECT */
 
@@ -218,7 +295,7 @@ static void    eval_event(void* ptr, int argc);
 static void extract_event(void* ptr, char* name);
 
 static y_userobj_t event_type = {
-  /* type_name:  */ "yaml_event",
+  /* type_name:  */   "yaml_event",
   /* on_free:    */    free_event,
   /* on_print:   */   print_event,
   /* on_eval:    */    eval_event,
@@ -232,7 +309,8 @@ struct _event_t {
   int init; /* contents has been initialized? */
 };
 
-static event_t* push_event()
+static event_t*
+push_event()
 {
   event_t* obj = (event_t*)ypush_obj(&event_type, sizeof(event_t));
   obj->init = FALSE;
@@ -298,6 +376,7 @@ extract_mark(const yaml_mark_t* mark, const char* name)
 static void
 extract_event(void* ptr, char* name)
 {
+  char buffer[64];
   event_t* obj = (event_t*)ptr;
 
   if (strcmp(name, "type") == 0) {
@@ -317,8 +396,15 @@ extract_event(void* ptr, char* name)
       break;
 
     case YAML_DOCUMENT_START_EVENT:
-      /* FIXME: missing: version_directive, tag_directives */
+      /* FIXME: missing: tag_directives */
       EXTRACT_INT(implicit, event.data.document_start.implicit);
+      if (strcmp(name, "version") == 0) {
+        sprintf(buffer, "%d.%d",
+                obj->event.data.document_start.version_directive->major,
+                obj->event.data.document_start.version_directive->minor);
+        push_string(buffer);
+        return;
+      }
       break;
 
     case YAML_DOCUMENT_END_EVENT:
@@ -371,7 +457,6 @@ extract_event(void* ptr, char* name)
   } else {
     y_error("uninitialized YAML event");
   }
-
 }
 
 /*---------------------------------------------------------------------------*/
@@ -383,7 +468,7 @@ static void    eval_parser(void* ptr, int argc);
 static void extract_parser(void* ptr, char* name);
 
 static y_userobj_t parser_type = {
-  /* type_name:  */ "yaml_parser",
+  /* type_name:  */   "yaml_parser",
   /* on_free:    */    free_parser,
   /* on_print:   */   print_parser,
   /* on_eval:    */    eval_parser,
@@ -466,7 +551,75 @@ static void extract_parser(void* ptr, char* name)
   } else {
     y_error("uninitialized YAML parser");
   }
+}
 
+/*---------------------------------------------------------------------------*/
+/* YAML EMITTER OBJECT */
+
+static void    free_emitter(void* ptr);
+static void   print_emitter(void* ptr);
+static void    eval_emitter(void* ptr, int argc);
+static void extract_emitter(void* ptr, char* name);
+
+static y_userobj_t emitter_type = {
+  /* type_name:  */   "yaml_emitter",
+  /* on_free:    */    free_emitter,
+  /* on_print:   */   print_emitter,
+  /* on_eval:    */    eval_emitter,
+  /* on_extract: */ extract_emitter,
+  /* uo_ops:     */ (void *)0
+};
+
+typedef struct _emitter_t emitter_t;
+struct _emitter_t {
+  yaml_emitter_t emitter; /* emitter data */
+  int init; /* emitter has been initialized? */
+  int open; /* output file is open and has to be closed */
+  FILE* output; /* output file */
+};
+
+static emitter_t* push_emitter()
+{
+  emitter_t* obj = (emitter_t*)ypush_obj(&emitter_type, sizeof(emitter_t));
+  obj->init = FALSE;
+  obj->open = FALSE;
+  return obj;
+}
+
+static void free_emitter(void* ptr)
+{
+  emitter_t* obj = (emitter_t*)ptr;
+  if (obj->init) {
+    yaml_emitter_delete(&obj->emitter);
+  }
+  if (obj->output != NULL && obj->open) {
+    fclose(obj->output);
+  }
+}
+
+static void print_emitter(void* ptr)
+{
+  emitter_t* obj = (emitter_t*)ptr;
+  if (obj->init) {
+    y_print("initialized YAML emitter", 1);
+  } else {
+    y_print("uninitialized YAML emitter", 1);
+  }
+}
+
+static void eval_emitter(void* ptr, int argc)
+{
+  y_error("not a callable object");
+}
+
+static void extract_emitter(void* ptr, char* name)
+{
+  emitter_t* obj = (emitter_t*)ptr;
+  if (obj->init) {
+    y_error("unknown YAML emitter member");
+  } else {
+    y_error("uninitialized YAML emitter");
+  }
 }
 
 /*---------------------------------------------------------------------------*/
@@ -488,30 +641,90 @@ Y_yaml_debug(int argc)
 }
 
 void
-Y_yaml_parser(int argc)
+Y___yaml_init__(int argc)
 {
-  parser_t* obj;
-  const char* filename;
+  initialize();
+}
 
-  if (argc != 1) {
-    y_error("expecting exactly one argument");
+void
+Y_yaml_version(int argc)
+{
+  push_string(yaml_get_version_string());
+}
+
+void
+Y_yaml_open(int argc)
+{
+  const char* filename;
+  const char* mode;
+
+  if (argc < 1 || argc > 2) {
+    y_error("expecting one or two arguments");
   }
-  filename = ygets_q(0);
-  obj = push_parser();
-  obj->input = fopen(filename, "r");
-  if (obj->input == NULL) {
-    y_error("failed to open file for reading");
+  filename = ygets_q(argc - 1); /* FIXME: parse tilde */
+  if (argc >= 2) {
+    mode = ygets_q(argc - 2);
+  } else {
+    mode = "r";
   }
-  if (! yaml_parser_initialize(&obj->parser)) {
-    y_error("failed to initialize parser");
+  if (mode[0] == 'r' && mode[1] == '\0') {
+    /* Create a parser. */
+    parser_t* obj = push_parser();
+    obj->input = fopen(filename, "r");
+    if (obj->input == NULL) {
+      y_error("failed to open file for reading");
+    }
+    if (! yaml_parser_initialize(&obj->parser)) {
+      y_error("failed to initialize parser");
+    }
+    obj->init = TRUE;
+    yaml_parser_set_input_file(&obj->parser, obj->input);
+  } else if ((mode[0] == 'r' || mode [0] == 'a') && mode[1] == '\0') {
+    /* Create an emitter. */
+    emitter_t* obj = push_emitter();
+    if (filename == NULL || filename[0] == '\0') {
+      obj->output = stdout;
+      obj->open = FALSE;
+    } else {
+      obj->output = fopen(filename, mode);
+      if (obj->output == NULL) {
+        y_error("failed to open file for writing");
+      }
+      obj->open = TRUE;
+    }
+    if (! yaml_emitter_initialize(&obj->emitter)) {
+      y_error("failed to initialize emitter");
+    }
+    obj->init = TRUE;
+    yaml_emitter_set_output_file(&obj->emitter, obj->output);
+  } else {
+    y_error("invalid file access mode");
   }
-  obj->init = TRUE;
-  yaml_parser_set_input_file(&obj->parser, obj->input);
+}
+
+#define NIL_OK (1U << 0)
+#define FRESH  (1U << 1)
+
+static event_t*
+get_event(int iarg, unsigned int flags)
+{
+  event_t* obj;
+
+  if ((flags & NIL_OK) != 0 && yarg_nil(iarg)) {
+    obj = push_event();
+  } else {
+    obj = (event_t*)yget_obj(iarg, &event_type);
+    if ((flags & FRESH) != 0 && obj->init) {
+      obj->init = FALSE;
+      yaml_event_delete(&obj->event);
+    }
+  }
+  return  obj;
 }
 
 
 void
-Y_yaml_next_event(int argc)
+Y_yaml_parse(int argc)
 {
   parser_t* src = NULL;
   event_t* dst = NULL;
@@ -545,4 +758,467 @@ Y_yaml_next_event(int argc)
     y_error("parser error");
   }
   dst->init = TRUE;
+}
+
+void
+Y_yaml_emit(int argc)
+{
+  emitter_t* dst = NULL;
+  int iarg;
+
+  if (argc < 1) {
+    y_error("expecting at least one argument");
+  }
+  iarg = argc;
+  dst = yget_obj(--iarg, &emitter_type);
+
+  /*
+   * Emit the event(s).  The emitter takes the responsibility for the event
+   * object and destroys its content after it is emitted. The event object is
+   * destroyed even if the function fails.
+   */
+  while (iarg > 0) {
+    event_t* src = yget_obj(--iarg, &event_type);
+    if (! src->init) {
+      y_error("unintialized event");
+    }
+    src->init = FALSE; /* before calling yaml_emitter_emit() */
+    if (! yaml_emitter_emit(&dst->emitter, &src->event)) {
+      y_error("emitter error");
+    }
+  }
+
+  /* Return nothing. */
+  ypush_nil();
+}
+
+void
+Y_yaml_stream_start_event(int argc)
+{
+  event_t* obj = NULL;
+  yaml_encoding_t encoding = YAML_ANY_ENCODING;
+  int iarg, drop = 0;
+
+  if (! initialized) {
+    initialize();
+  }
+  for (iarg = argc - 1; iarg >= 0; --iarg) {
+    long index = yarg_key(iarg);
+    if (index < 0) {
+      /* Positional argument. */
+      if (obj == NULL) {
+        obj = get_event(iarg, NIL_OK|FRESH);
+        drop = iarg;
+      } else {
+        y_error("too many arguments");
+      }
+    } else {
+      /* Keyword argument. */
+      if (index == encoding_index) {
+        encoding = ygets_i(--iarg);
+      } else {
+        y_error("unknown keyword");
+      }
+    }
+  }
+
+  /* Manage to push/let the result on top of the stack. */
+  if (obj == NULL) {
+    obj = push_event();
+  } else if (drop > 0) {
+    yarg_drop(drop);
+  }
+  if (! yaml_stream_start_event_initialize(&obj->event, encoding)) {
+    y_error("failed to initialize STREAM-START event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_stream_end_event(int argc)
+{
+  event_t* obj;
+
+  if (argc != 1) {
+    y_error("expecting exactly one argument");
+  }
+  obj = get_event(0, NIL_OK|FRESH);
+  if (! yaml_stream_end_event_initialize(&obj->event)) {
+    y_error("failed to initialize STREAM-END event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_document_start_event(int argc)
+{
+  event_t* obj = NULL;
+  yaml_version_directive_t version_directive;
+  yaml_version_directive_t* version = NULL;
+  int implicit = TRUE;
+  int iarg, drop = 0;
+
+  if (! initialized) {
+    initialize();
+  }
+  for (iarg = argc - 1; iarg >= 0; --iarg) {
+    long index = yarg_key(iarg);
+    if (index < 0) {
+      /* Positional argument. */
+      if (obj == NULL) {
+        obj = get_event(iarg, NIL_OK|FRESH);
+        drop = iarg;
+      } else {
+        y_error("too many arguments");
+      }
+    } else {
+      /* Keyword argument. */
+      if (index == implicit_index) {
+        implicit = yarg_true(--iarg);
+      } else if (index == version_index) {
+        --iarg;
+        if (! yarg_nil(iarg)) {
+          long major, minor;
+          const char* str = ygets_q(iarg);
+          if (str == NULL) {
+          bad_version:
+            y_error("bad version number");
+          }
+          str = parse_integer(str, &major, NO_SIGN);
+          if (str == NULL || str[0] != '.') {
+            goto bad_version;
+          }
+          str = parse_integer(str + 1, &minor, NO_SIGN);
+          if (str == NULL || str[0] != '\0') {
+            goto bad_version;
+          }
+          version_directive.major = major;
+          version_directive.minor = minor;
+          version = &version_directive;
+        }
+      } else {
+        y_error("unknown keyword");
+      }
+    }
+  }
+
+  /* Manage to push/let the result on top of the stack. */
+  if (obj == NULL) {
+    obj = push_event();
+  } else if (drop > 0) {
+    yarg_drop(drop);
+  }
+  if (! yaml_document_start_event_initialize(&obj->event, version,
+                                             NULL, NULL, implicit)) {
+    y_error("failed to initialize DOCUMENT-START event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_document_end_event(int argc)
+{
+  event_t* obj = NULL;
+  int implicit = TRUE;
+  int iarg, drop = 0;
+
+  if (! initialized) {
+    initialize();
+  }
+  for (iarg = argc - 1; iarg >= 0; --iarg) {
+    long index = yarg_key(iarg);
+    if (index < 0) {
+      /* Positional argument. */
+      if (obj == NULL) {
+        obj = get_event(iarg, NIL_OK|FRESH);
+        drop = iarg;
+      } else {
+        y_error("too many arguments");
+      }
+    } else {
+      /* Keyword argument. */
+      if (index == implicit_index) {
+        implicit = yarg_true(--iarg);
+      } else {
+        y_error("unknown keyword");
+      }
+    }
+  }
+
+  /* Manage to push/let the result on top of the stack. */
+  if (obj == NULL) {
+    obj = push_event();
+  } else if (drop > 0) {
+    yarg_drop(drop);
+  }
+  if (! yaml_document_end_event_initialize(&obj->event, implicit)) {
+    y_error("failed to initialize DOCUMENT-END event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_alias_event(int argc)
+{
+  event_t* obj = NULL;
+  yaml_char_t* anchor = NULL;
+  int iarg, drop = 0;
+
+  if (! initialized) {
+    initialize();
+  }
+  for (iarg = argc - 1; iarg >= 0; --iarg) {
+    long index = yarg_key(iarg);
+    if (index < 0) {
+      /* Positional argument. */
+      if (obj == NULL) {
+        obj = get_event(iarg, NIL_OK|FRESH);
+        drop = iarg;
+      } else {
+        y_error("too many arguments");
+      }
+    } else {
+      /* Keyword argument. */
+      if (index == anchor_index) {
+        anchor = (yaml_char_t*)ygets_q(--iarg);
+      } else {
+        y_error("unknown keyword");
+      }
+    }
+  }
+
+  /* Manage to push/let the result on top of the stack. */
+  if (obj == NULL) {
+    obj = push_event();
+  } else if (drop > 0) {
+    yarg_drop(drop);
+  }
+  if (! yaml_alias_event_initialize(&obj->event, anchor)) {
+    y_error("failed to initialize ALIAS event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_scalar_event(int argc)
+{
+  char buffer[64];
+  event_t* obj = NULL;
+  yaml_char_t* anchor = NULL;
+  yaml_char_t* tag = NULL;
+  yaml_char_t* value = NULL;
+  int plain_implicit = TRUE;
+  int quoted_implicit = TRUE;
+  yaml_scalar_style_t style = YAML_ANY_SCALAR_STYLE;
+  int iarg, drop = 0, number, length = 0;
+
+  if (! initialized) {
+    initialize();
+  }
+  for (iarg = argc - 1; iarg >= 0; --iarg) {
+    long index = yarg_key(iarg);
+    if (index < 0) {
+      /* Positional argument. */
+      if (obj == NULL) {
+        obj = get_event(iarg, NIL_OK|FRESH);
+        drop = iarg;
+      } else {
+        y_error("too many arguments");
+      }
+    } else {
+      /* Keyword argument. */
+      if (index == anchor_index) {
+        anchor = (yaml_char_t*)ygets_q(--iarg);
+      } else if (index == tag_index) {
+        tag = (yaml_char_t*)ygets_q(--iarg);
+      } else if (index == value_index) {
+        --iarg;
+        number = yarg_number(iarg);
+        if (number == 1) {
+          /* Integer. */
+          long val = ygets_l(iarg);
+          sprintf(buffer, "%ld", val);
+          value = (yaml_char_t*)buffer;
+        } else if (number == 2) {
+          /* Floating-point. */
+          double val = ygets_d(iarg);
+          sprintf(buffer, "%g", val);
+          value = (yaml_char_t*)buffer;
+        } else if (number == 3) {
+          /* Complex. */
+          double* arr = ygeta_z(iarg, NULL, NULL);
+          sprintf(buffer, "%g %s %gim", arr[0], (arr[1] >= 0 ? "+" : "-"),
+                  fabs(arr[1]));
+          value = (yaml_char_t*)buffer;
+        } else if (yarg_string(iarg)) {
+          value = (yaml_char_t*)ygets_q(iarg);
+        } else {
+          y_error("value must be a string or a numerical scalar");
+        }
+      } else if (index == plain_implicit_index) {
+        plain_implicit = yarg_true(--iarg);
+      } else if (index == quoted_implicit_index) {
+        quoted_implicit = yarg_true(--iarg);
+      } else if (index == style_index) {
+        style = ygets_i(--iarg);
+      } else {
+        y_error("unknown keyword");
+      }
+    }
+  }
+  if (value == NULL || value[0] == '\0') {
+    length = 0;
+  } else {
+    size_t len = strlen((const char*)value);
+    length = (int)len;
+    if (length != len) {
+      y_error("integer overflow");
+    }
+  }
+
+  /* Manage to push/let the result on top of the stack. */
+  if (obj == NULL) {
+    obj = push_event();
+  } else if (drop > 0) {
+    yarg_drop(drop);
+  }
+  if (! yaml_scalar_event_initialize(&obj->event, anchor, tag, value, length,
+                                     plain_implicit, quoted_implicit, style)) {
+    y_error("failed to initialize SCALAR event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_sequence_start_event(int argc)
+{
+  event_t* obj = NULL;
+  yaml_char_t* anchor = NULL;
+  yaml_char_t* tag = NULL;
+  int implicit = TRUE;
+  yaml_sequence_style_t style = YAML_ANY_SEQUENCE_STYLE;
+  int iarg, drop = 0;
+
+  if (! initialized) {
+    initialize();
+  }
+  for (iarg = argc - 1; iarg >= 0; --iarg) {
+    long index = yarg_key(iarg);
+    if (index < 0) {
+      /* Positional argument. */
+      if (obj == NULL) {
+        obj = get_event(iarg, NIL_OK|FRESH);
+        drop = iarg;
+      } else {
+        y_error("too many arguments");
+      }
+    } else {
+      /* Keyword argument. */
+      if (index == anchor_index) {
+        anchor = (yaml_char_t*)ygets_q(--iarg);
+      } else if (index == tag_index) {
+        tag = (yaml_char_t*)ygets_q(--iarg);
+      } else if (index == style_index) {
+        style = ygets_i(--iarg);
+      } else if (index == implicit_index) {
+        implicit = yarg_true(--iarg);
+      } else {
+        y_error("unknown keyword");
+      }
+    }
+  }
+
+  /* Manage to push/let the result on top of the stack. */
+  if (obj == NULL) {
+    obj = push_event();
+  } else if (drop > 0) {
+    yarg_drop(drop);
+  }
+  if (! yaml_sequence_start_event_initialize(&obj->event, anchor, tag,
+                                             implicit, style)) {
+    y_error("failed to initialize SEQUENCE-START event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_sequence_end_event(int argc)
+{
+  event_t* obj;
+
+  if (argc != 1) {
+    y_error("expecting exactly one argument");
+  }
+  obj = get_event(0, NIL_OK|FRESH);
+  if (! yaml_sequence_end_event_initialize(&obj->event)) {
+    y_error("failed to initialize SEQUENCE-END event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_mapping_start_event(int argc)
+{
+  event_t* obj = NULL;
+  yaml_char_t* anchor = NULL;
+  yaml_char_t* tag = NULL;
+  int implicit = TRUE;
+  yaml_mapping_style_t style = YAML_ANY_MAPPING_STYLE;
+  int iarg, drop = 0;
+
+  if (! initialized) {
+    initialize();
+  }
+  for (iarg = argc - 1; iarg >= 0; --iarg) {
+    long index = yarg_key(iarg);
+    if (index < 0) {
+      /* Positional argument. */
+      if (obj == NULL) {
+        obj = get_event(iarg, NIL_OK|FRESH);
+        drop = iarg;
+      } else {
+        y_error("too many arguments");
+      }
+    } else {
+      /* Keyword argument. */
+      if (index == anchor_index) {
+        anchor = (yaml_char_t*)ygets_q(--iarg);
+      } else if (index == tag_index) {
+        tag = (yaml_char_t*)ygets_q(--iarg);
+      } else if (index == style_index) {
+        style = ygets_i(--iarg);
+      } else if (index == implicit_index) {
+        implicit = yarg_true(--iarg);
+      } else {
+        y_error("unknown keyword");
+      }
+    }
+  }
+
+  /* Manage to push/let the result on top of the stack. */
+  if (obj == NULL) {
+    obj = push_event();
+  } else if (drop > 0) {
+    yarg_drop(drop);
+  }
+  if (! yaml_mapping_start_event_initialize(&obj->event, anchor, tag,
+                                             implicit, style)) {
+    y_error("failed to initialize MAPPING-START event");
+  }
+  obj->init = TRUE;
+}
+
+void
+Y_yaml_mapping_end_event(int argc)
+{
+  event_t* obj;
+
+  if (argc != 1) {
+    y_error("expecting exactly one argument");
+  }
+  obj = get_event(0, NIL_OK|FRESH);
+  if (! yaml_mapping_end_event_initialize(&obj->event)) {
+    y_error("failed to initialize MAPPING-END event");
+  }
+  obj->init = TRUE;
 }
