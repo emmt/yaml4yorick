@@ -14,6 +14,10 @@
 if (is_func(plug_in)) plug_in, "yaml";
 
 func yaml_print(filename)
+/* DOCUMENT yaml_print(filename)
+   print the content of the YAML file FILENAME
+   SEE ALSO: yaml_parse, event_print_type, yaml_load
+ */
 {
   true = 1n;
   false = 0n;
@@ -51,6 +55,210 @@ func yaml_print(filename)
     write, format="%s\n", str;
   }
 }
+
+
+func event_print_type(event)
+/* DOCUMENT event_print_type(event)
+   print the content of the type of the YAML event EVENT
+   SEE ALSO:  yaml_print
+ */
+{
+  type = event.type;
+  if (type == YAML_NO_EVENT) {
+    str = "No event!";
+  } else if (type == YAML_STREAM_START_EVENT) {
+    str = "<b>Start Stream</b>";
+  } else if (type == YAML_STREAM_END_EVENT) {
+    str = "<b>End Stream</b>";
+    done = true;
+  } else if (type == YAML_DOCUMENT_START_EVENT) {
+    str = "<b>Start Document</b>";
+  } else if (type == YAML_DOCUMENT_END_EVENT) {
+    str = "<b>End Document</b>";
+  } else if (type == YAML_ALIAS_EVENT) {
+    str = swrite(format="Got alias (anchor %s)", event.anchor);
+  } else if (type == YAML_SCALAR_EVENT) {
+    str = swrite(format="Got scalar (value %s)", event.value);
+  } else if (type == YAML_SEQUENCE_START_EVENT) {
+    str = "<b>Start Sequence</b>";
+  } else if (type == YAML_SEQUENCE_END_EVENT) {
+    str = "<b>End Sequence</b>";
+  } else if (type == YAML_MAPPING_START_EVENT) {
+    str = "<b>Start Mapping</b>";
+  } else if (type == YAML_MAPPING_END_EVENT) {
+    str = "<b>End Mapping</b>";
+  } else  {
+    str = "<b>Unknown Event</b>";
+  }
+  write, format="%s\n", str;
+}
+
+
+
+func yaml_load(filename)
+/* DOCUMENT doc = yaml_load(filename)
+   load the first document of a YAML file
+   FILENAME can either be a YAML filename or a YAML parser object.
+   The type of DOC depend of the nature of the first level of the document:
+       DOC is a htab if the document begin with a MAPPING
+       DOC is an array if the document is an sequence of string
+       DOC is an object if the document is a sequence
+   SEE ALSO:  yaml_load_all,yaml_open
+ */
+{
+  true = 1n;
+  false = 0n;
+
+  if(typeof(filename) == "yaml_parser"){
+    eq_nocopy,parser, filename;
+  }else if (is_string(filename)){
+    parser = yaml_open(filename, "r");
+  }
+  
+  event = yaml_parse(parser);
+  if (event.type != YAML_STREAM_START_EVENT) {
+      error, "yaml file should begin with a stream start event"
+  } 
+  
+  event = yaml_parse(parser);
+  if (event.type != YAML_DOCUMENT_START_EVENT) {
+      error, "yaml document should begin with a document start event"
+  }
+
+  
+  while(  (type = (event = yaml_parse(parser)).type)!= YAML_DOCUMENT_END_EVENT){
+    if (type == YAML_SEQUENCE_START_EVENT) {
+      doc= yaml_build_sequence(parser);
+    } else if (type == YAML_MAPPING_START_EVENT) {
+      doc = yaml_build_mapping(parser);
+    } else  {
+      error, "unexpected event: doc should be composed of mapping or sequence only"; 
+    }
+  }
+  
+  return doc;
+  
+}
+
+
+func yaml_load_all(filename)
+/* DOCUMENT doc = yaml_load_all(filename)
+   load the first document of a YAML file
+   FILENAME can either be a YAML filename or a YAML parser object.
+   DOC is an object containing all the documents
+   SEE ALSO:  yaml_load_all,yaml_open
+ */
+{
+  true = 1n;
+  false = 0n;
+
+  if(typeof(filename) == "yaml_parser"){
+    eq_nocopy,parser, filename;
+  }else if (is_string(filename)){
+    parser = yaml_open(filename, "r");
+  }
+  
+  event = yaml_parse(parser);
+  if (event.type != YAML_STREAM_START_EVENT) {
+    error, "yaml file should begin with a stream start event";
+  } 
+  
+  doc =  save();
+  idx = 0;
+  while(  (type = (event = yaml_parse(parser)).type)!= YAML_STREAM_END_EVENT){
+    
+    if (event.type != YAML_DOCUMENT_START_EVENT) {
+      error, "yaml document should begin with a document start event";
+    }
+    
+    while(  (type = (event = yaml_parse(parser)).type)!= YAML_DOCUMENT_END_EVENT){
+      if (type == YAML_SEQUENCE_START_EVENT) {
+        save,doc,swrite(format="doc%ld",++idx), yaml_build_sequence(parser);
+      } else if (type == YAML_MAPPING_START_EVENT) {
+        save,doc,swrite(format="doc%ld",++idx), yaml_build_mapping(parser);
+      } else  {
+        error, "unexpected event: doc should be composed of mapping or sequence only"; 
+      }
+    }
+  }
+  
+  return doc;
+  
+}
+
+
+func yaml_build_mapping(parser){
+  true = 1n;
+  false = 0n;
+  htab = h_new();
+  
+  while(1) {
+    event = yaml_parse(parser);
+    type = event.type;
+    
+    if (type == YAML_SCALAR_EVENT) {
+      key  = event.value;    
+    }else if (type == YAML_MAPPING_END_EVENT){
+      break;
+    }else{
+      error, "Waiting for a mapping key";
+    }
+
+    event = yaml_parse(parser);
+    type = event.type;
+    if (type == YAML_SCALAR_EVENT) {
+      value  =  event.value;
+    } else if (type == YAML_SEQUENCE_START_EVENT) {
+      value = yaml_build_sequence(parser);
+    } else if (type == YAML_MAPPING_START_EVENT) {
+      value = yaml_build_mapping(parser);
+    }else{
+      error, "Waiting for a mapping value";
+    }
+    h_set,htab,key,value;
+  }
+  return htab;
+}
+                
+func yaml_build_sequence(parser){
+  true = 1n;
+  false = 0n;
+  scalar_only=true;
+  while(1) {
+    event = yaml_parse(parser);
+    type = event.type;
+    
+    if (type == YAML_SEQUENCE_END_EVENT){
+      break;
+    }else if (type == YAML_SCALAR_EVENT) {
+      value  =  event.value;
+    } else if (type == YAML_SEQUENCE_START_EVENT) {
+      value = yaml_build_sequence(parser);
+      scalar_only=false;
+    } else if (type == YAML_MAPPING_START_EVENT) {
+      value = yaml_build_mapping(parser);
+      scalar_only=false;
+    }else{
+      error, "Waiting for a sequence value";
+    }
+    list  = _cat(list,value);
+  }
+  ll = _len(list);
+  if(scalar_only){
+    tab = array(string,ll);
+    for (i=0;i<ll;i++){
+      tab(ll-i) =_nxt(list); 
+    }
+  }else{
+    tab = save();
+    for (i=0;i<ll;i++){
+      save,tab,swrite(format="%ld",ll-i),_nxt(list); 
+    }
+  }
+  return tab;
+}
+
+                              
 
 /*extern yaml_event;*/
 
